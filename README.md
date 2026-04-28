@@ -1,0 +1,174 @@
+# マンダラ株分析 — Phase 3
+
+グロース株のマンダラチャート式分析ツール（個人利用 / iPhone PWA）。
+
+- 階層型マンダラチャート（第1階層9マス → 第2階層 各9マス、合計72マス）
+- 8軸：業績 / 財務 / バリュエーション / テクニカル&チャートパターン / 業界 / マクロ / 投資家注目度 / 四季報定性
+- スコア加重平均で総合スコアを自動算出（買い／中立／見送り判定）
+- IndexedDB によるブラウザローカル保存（サーバ送信なし）
+- JSON エクスポート／インポートでバックアップ
+- 和モダン×ネオン UI、Framer Motion アニメーション
+- PWA：iPhone Safari からホーム画面追加でアプリのように使える
+- Vercel Edge Middleware による Basic 認証で他人のアクセスを遮断
+
+### Phase 2
+- API 自動入力：J-Quants / EDINET / FRED から軸を一発入力
+- チャートパターン自動検出：MA・ステージ分析・カップウィズハンドル・ブレイクアウト・52週位置
+- バッジ／徽章システム：個別銘柄＆ポートフォリオ
+- スナップショット永続化：日々のスコアを保存して推移を可視化
+
+### Phase 3 (NEW)
+- **アプリ起動時の自動スナップショット**：今日分が無ければ自動保存（ホーム画面トーストで通知）
+- **コサイン類似度による類似銘柄レコメンド**：登録済み銘柄の中から 8軸ベクトルが近い 3 銘柄を表示
+- **競合銘柄サジェスト**：J-Quants の 33業種コードから同業他社を抽出してワンタップで追加
+- **バックテスト**：保存したスナップショットを使って「総合スコア vs N日先リターン」の相関・勝率・平均リターンを算出
+- **Google Trends 本実装**：非公式 explore エンドポイントで興味推移を取得
+- **Vercel Cron**：日次でマクロデータ（FRED）のキャッシュを自動温め
+
+---
+
+## ローカル開発
+
+```bash
+npm install
+cp .env.example .env.local   # 認証情報 & 各 API キーを設定
+npm run dev
+# → http://localhost:3000
+```
+
+## デプロイ手順（Vercel・初回1回だけ）
+
+1. **GitHub にリポジトリを作成**（Private 推奨）し、このフォルダ一式を push
+2. **Vercel にログイン**（https://vercel.com）→ "Add New" → "Project"
+3. 上記 GitHub リポジトリを選択 → Framework は Next.js 自動検出
+4. **Environment Variables** に下記を追加
+
+| 変数名 | 必須 | 用途 | 取得先 |
+|---|---|---|---|
+| `BASIC_AUTH_USER` | ✅ | 認証ユーザー名 | 任意の文字列 |
+| `BASIC_AUTH_PASS` | ✅ | 認証パスワード | 任意の強パスフレーズ |
+| `JQUANTS_REFRESH_TOKEN` | 推奨 | J-Quants API（株価・財務・競合） | https://jpx-jquants.com マイページ |
+| `EDINET_SUBSCRIPTION_KEY` | 任意 | EDINET（大量保有報告） | https://api.edinet-fsa.go.jp |
+| `FRED_API_KEY` | 任意 | FRED（米国マクロ） | https://fred.stlouisfed.org/docs/api/api_key.html |
+| `ESTAT_APP_ID` | 任意 | e-Stat（日本政府統計） | https://www.e-stat.go.jp/api |
+| `NEWSAPI_KEY` | 任意 | NewsAPI（ニュース） | https://newsapi.org |
+| `CRON_SECRET` | 任意 | Vercel Cron 認証 | 任意のランダム文字列（Vercel Cron 利用時のみ） |
+
+5. **Deploy** をクリック → 1〜2分で完成
+6. 公開URLが表示される（例：`mandala-stock-xxx.vercel.app`）
+   - 任意で Settings → Domains から推測されにくいサブドメインに変更
+
+以降は `git push` するだけで自動再デプロイ。
+
+## iPhone へのインストール
+
+1. iPhone Safari で公開URLを開く（初回のみ Basic 認証ダイアログ → 入力）
+2. 共有メニュー → 「ホーム画面に追加」
+3. ホーム画面のアイコンから起動。フルスクリーン表示でアプリ感覚。
+
+## 操作方法
+
+### 基本（Phase 1）
+- **銘柄追加**：右下「＋」ボタン → ティッカー＆銘柄名
+- **マンダラを開く**：銘柄カードをタップ
+- **第2階層に潜る**：マンダラの周囲8マスをタップ
+- **スコア入力**：第2階層の各マスをタップ → 0〜100 入力 + メモ
+- **自動計算**：中央セルは加重平均で自動更新（編集不可）
+- **戻る**：第2階層 →「戻る」で第1階層、第1階層 →「一覧」でリスト
+
+### Phase 2
+- **API 自動入力**：第2階層を開いている時に下部の「API から自動入力」ボタンをタップ → 該当軸の API を呼び出し → セルが一気に埋まる
+  - `業績` → J-Quants /fins/statements（売上・営利・EPS 成長率、利益率、進捗率を計算）
+  - `テクニカル` → J-Quants /prices/daily_quotes → MA / ステージ / カップ / ブレイクアウト / 52週位置を判定
+  - `マクロ` → FRED（USD/JPY, US10Y, S&P500, VIX, WTI など）
+  - `投資家注目度` → EDINET（直近30日の大量保有報告書件数）
+- **スナップショット**：銘柄詳細画面 → 「今日のスコアを保存」ボタンで日次記録 → 推移チャート表示
+- **バッジ**：銘柄＆ポートフォリオで自動付与（72マス満マス・総合80超・8軸制覇 など）
+
+### Phase 3
+- **自動スナップショット**：アプリを開くだけで、今日分が無い銘柄を全自動で保存（ホーム画面に「✓ 今日のスナップショットを N 銘柄自動保存しました」と通知）
+- **類似銘柄**：銘柄詳細画面の下部に、登録済み銘柄から 8軸スコアの近い 3 銘柄をリンク表示（コサイン類似度 %）
+- **同業種の銘柄**：「競合を読み込む」ボタン → J-Quants から同 33業種を抽出 → ワンタップで自分のリストに追加可能
+- **バックテスト**：「実行」ボタン → 過去株価を取得 → スナップショットの各日のスコアと N日先リターンを照合 → 勝率・平均リターン・相関係数を表示。スコア 80 以上だった時の勝率も別途集計
+
+## Vercel Cron（任意）
+
+`vercel.json` に日次 Cron が設定されている：
+
+```json
+{
+  "crons": [
+    { "path": "/api/cron/warm-macro", "schedule": "0 22 * * *" }
+  ]
+}
+```
+
+- 毎日 UTC 22:00（JST 翌 7:00）に FRED マクロデータをキャッシュに温め直す
+- `CRON_SECRET` を環境変数に設定しておくと、Cron 以外からの呼び出しを 401 で拒否
+- Vercel Hobby プランは Cron 月 100 回まで無料 → 日次なら余裕
+
+## ディレクトリ構成
+
+```
+src/
+├── app/                       # Next.js App Router
+│   ├── page.tsx                       # 銘柄一覧
+│   ├── stock/[ticker]/page.tsx        # マンダラ詳細
+│   ├── settings/page.tsx              # バックアップ設定
+│   └── api/                           # Vercel Serverless Functions
+│       ├── quote/route.ts             # 株価
+│       ├── fundamental/route.ts       # 財務
+│       ├── macro/route.ts             # マクロ
+│       ├── attention/route.ts         # EDINET
+│       ├── news/route.ts              # ニュース
+│       ├── trends/route.ts            # Google Trends
+│       ├── competitors/route.ts       # ★ Phase 3 競合銘柄
+│       └── cron/warm-macro/route.ts   # ★ Phase 3 Vercel Cron
+├── components/
+│   ├── MandalaGrid.tsx                # 9マス本体
+│   ├── CellEditor.tsx                 # セル編集モーダル
+│   ├── ScoreBadge.tsx
+│   ├── CompletionRing.tsx
+│   ├── BadgeShelf.tsx                 # バッジ表示
+│   ├── SnapshotChart.tsx              # スナップショット推移
+│   ├── SimilarStocks.tsx              # ★ Phase 3 類似銘柄
+│   ├── CompetitorList.tsx             # ★ Phase 3 同業他社
+│   └── BacktestPanel.tsx              # ★ Phase 3 バックテスト
+├── domain/
+│   ├── types.ts                       # Stock / Mandala / Cell
+│   ├── seed.ts                        # 8軸の初期構造
+│   └── scoring.ts                     # 加重平均ロジック
+├── storage/
+│   └── db.ts                          # IndexedDB (idb) + Snapshot
+└── lib/                               # API 連携・パターン検出・分析
+    ├── cache.ts                       # API レスポンスキャッシュ
+    ├── autofill.ts                    # 軸 → adapter → cells 適用
+    ├── auto-snapshot.ts               # ★ Phase 3 起動時の自動保存
+    ├── similarity.ts                  # ★ Phase 3 コサイン類似度
+    ├── backtest.ts                    # ★ Phase 3 バックテストエンジン
+    ├── badges/index.ts                # バッジ判定
+    ├── clients/                       # 各 API のクライアント
+    │   ├── jquants.ts                 # 競合機能用に拡張
+    │   ├── edinet.ts
+    │   ├── fred.ts
+    │   ├── boj.ts
+    │   ├── estat.ts
+    │   ├── news.ts
+    │   └── trends.ts                  # ★ Phase 3 本実装
+    ├── adapters/                      # API レスポンス → CellPatch
+    │   ├── earnings.ts
+    │   ├── macro.ts
+    │   ├── attention.ts
+    │   ├── technical.ts
+    │   └── scoring-utils.ts
+    └── patterns/index.ts              # チャートパターン検出
+```
+
+## 注意事項
+
+- ブラウザ内 IndexedDB に保存しているため、Safari の ITP により**長期間アプリを開かないとデータが消える可能性**があります。月1回の起動 + 設定画面からの JSON エクスポートを推奨。
+- 投資判断スコアはあくまで補助です。最終判断はご自身の責任で行ってください。
+- API は外部サービスに依存しているため、無料プランの上限に達すると一時的に動作しない場合があります（その場合は手動入力にフォールバック）。
+- J-Quants / EDINET / FRED の利用規約を遵守し、過度なリクエストは行わないこと（本実装はサーバ側で 20分〜24時間のキャッシュを挟んでいる）。
+- Google Trends は非公式エンドポイントを使用しており、レート制限や仕様変更で動かなくなる可能性があります。
+- バックテストは過去の傾向であり将来の成績を保証しません。スナップショット数が少ないうちは相関の信頼度も低めに見てください（5日以上から実行可能）。

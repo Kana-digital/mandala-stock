@@ -1,0 +1,46 @@
+name: Daily Mandala Refresh
+
+on:
+  schedule:
+    # 毎朝 6:00 JST = 21:00 UTC（前日）
+    - cron: '0 21 * * *'
+  workflow_dispatch:  # 手動実行も可能
+
+# 同時実行を抑止（前日分が走ってる間は次を待つ）
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 全 ~3,600 銘柄を控えめ並列で取得（クールダウン込み）
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Refresh mandala data
+        env:
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          # GH IP は共有のため特に控えめ
+          REFRESH_CONCURRENCY: '2'
+          REFRESH_SLEEP_MS: '500'
+        run: npm run refresh
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Refresh result" >> $GITHUB_STEP_SUMMARY
+          echo "- Finished at: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

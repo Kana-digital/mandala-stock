@@ -1,0 +1,49 @@
+name: Weekly Universe Update
+
+on:
+  schedule:
+    # 毎週月曜 5:30 JST = 月曜 20:30 UTC（前日相当の日曜）
+    # JPX が金曜夜に翌週分を更新するので月曜朝に反映
+    - cron: '30 20 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # JSON を commit/push するため
+
+concurrency:
+  group: update-universe
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download JPX list & update jp-stocks.json
+        run: npm run update-universe
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lib/jp-stocks.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update universe from JPX [skip ci]"
+            git push
+            echo "Universe updated and pushed"
+          fi
