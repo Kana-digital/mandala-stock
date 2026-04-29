@@ -1,20 +1,30 @@
 /**
- * Mandala データ更新スクリプト（全上場銘柄対応版）
+ * Mandala データ更新スクリプト（Stooq 版・全上場銘柄対応）
  *
  * 使い方:
  *   npm run refresh
  *
  * 動作:
  *   1. src/lib/jp-stocks.json から全銘柄ロード
- *   2. Yahoo Finance から並列取得（concurrency 6, sleep 100ms）
- *   3. 失敗銘柄はスキップして続行（429 は exponential backoff で 2回リトライ）
+ *   2. Stooq から並列で日足 CSV を取得（concurrency 8 デフォルト）
+ *   3. 失敗銘柄はスキップして続行（ネットワーク系は exponential backoff で 2 回リトライ）
  *   4. 個別マンダラを Upstash に書き込み（mandala:{code}）
  *   5. スリムランキングを 1000 件単位でチャンク保存（ranking:slim:N）
  *
+ * 設計判断:
+ *   - Yahoo Finance はクラウド IP（GH Actions / Vercel / 一部 ISP）から完全 IP ブロック中。
+ *     2026/04 時点で Mac/macOS launchd / GH runners 双方ともに 429 を返すため使えない。
+ *   - 代替として Stooq の無料 CSV API を使う。Stooq は商用クラウド IP も普通に通る。
+ *   - ファンダメンタル（PER, ROE 等）は Stooq には無いため、当バージョンは「チャートのみ」運用。
+ *     成長性 / 収益性 / 割安度 / 財務健全性 の 4 カテゴリは「データ未取得」として 0 点表示。
+ *     必要なら J-Quants /fins/statements を別ジョブで週次同期して合成 summary を構築する。
+ *   - 旧 forecast カテゴリ（アナリスト目標）は廃止し、出来高サージ + 高値接近度 + ボラ急騰の
+ *     注目度 attention カテゴリに置換した（mandala-engine.ts 側で実装）。
+ *
  * 実行環境:
- *   - Mac/macOS launchd（住宅 IP）→ Yahoo に通る
- *   - GitHub Actions runner → Yahoo に通る（IP 共有のため稀に 429）
- *   - Vercel Function → Yahoo に弾かれるので NG（このスクリプトでは使わない）
+ *   - GitHub Actions runner → Stooq に通る ✓
+ *   - ローカル (Mac) → Stooq に通る ✓
+ *   - Vercel Cron Function → 5分制限を超えるので NG（このスクリプトでは使わない）
  */
 
 // dotenv はローカル実行時のみ。GH Actions では env から直接来るので失敗を許容。
@@ -28,8 +38,8 @@ async function loadDotenv() {
   }
 }
 
-import { yfChart, yfQuoteSummary } from '../src/lib/clients/yahoo';
-import { UNIVERSE, toYfTicker } from '../src/lib/universe';
+import { stooqChartWithRetry, sliceRecent, StooqError } from '../src/lib/clients/stooq';
+import { UNIVERSE } from '../src/lib/universe';
 import { buildMandala, type MandalaResult } from '../src/lib/mandala-engine';
 import {
   kvSet,
@@ -40,17 +50,12 @@ import {
   type SlimRankingMeta,
 } from '../src/lib/clients/kv';
 
-// 同時並列数（Yahoo の優しさを乱用しない）
-// デフォルトは保守的に2並列。大丈夫そうなら REFRESH_CONCURRENCY=4 などで上げる
-const CONCURRENCY = Number(process.env.REFRESH_CONCURRENCY ?? 2);
+// 同時並列数（Stooq は Yahoo より寛容。8 並列でも安定するはず）
+const CONCURRENCY = Number(process.env.REFRESH_CONCURRENCY ?? 8);
 // 各リクエスト後の sleep（ms）
-const SLEEP_MS = Number(process.env.REFRESH_SLEEP_MS ?? 500);
-// リトライ最大回数（429 のとき exponential backoff）
-const MAX_RETRIES = 3;
-// 429 が連続したら長時間休む（ミリ秒）
-const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000; // 5 分
-// 連続 429 のしきい値
-const RATE_LIMIT_BURST_THRESHOLD = 10;
+const SLEEP_MS = Number(process.env.REFRESH_SLEEP_MS ?? 60);
+// Stooq からの取得タイムアウト
+const FETCH_TIMEOUT_MS = Number(process.env.REFRESH_TIMEOUT_MS ?? 15000);
 // 進捗ログを出す間隔（銘柄数）
 const LOG_INTERVAL = 100;
 // スリムランキング 1チャンクあたりのエントリ数
@@ -60,11 +65,6 @@ const LEGACY_RANKING_ALL_THRESHOLD = 500;
 
 function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
-}
-
-function isRateLimitError(e: unknown): boolean {
-  const msg = e instanceof Error ? e.message : String(e);
-  return /429|too many requests|rate limit/i.test(msg);
 }
 
 async function poolRun<T, R>(
@@ -88,59 +88,42 @@ async function poolRun<T, R>(
 // 失敗内訳を集計（後でサマリー）
 const failReasons: Map<string, number> = new Map();
 const sampleErrors: string[] = [];
-// 連続 429 検出用（共有ステート）
-let consecutiveRateLimits = 0;
-let lastCooldownAt = 0;
 
 async function computeOne(
   stock: { code: string; name: string; sector: string },
 ): Promise<MandalaResult | null> {
-  const ticker = toYfTicker(stock.code);
-
-  let lastErr: Error | null = null;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const [chart, summary] = await Promise.all([
-        yfChart(ticker, '1y'),
-        yfQuoteSummary(ticker),
-      ]);
-      consecutiveRateLimits = 0; // 成功したらリセット
-      return buildMandala({ ...stock, chart, summary });
-    } catch (e) {
-      lastErr = e as Error;
-      if (isRateLimitError(e)) {
-        consecutiveRateLimits++;
-        // 連続429がしきい値超えたら長期クールダウン（並列ワーカ全員が同時に通る）
-        if (
-          consecutiveRateLimits >= RATE_LIMIT_BURST_THRESHOLD &&
-          Date.now() - lastCooldownAt > RATE_LIMIT_COOLDOWN_MS
-        ) {
-          lastCooldownAt = Date.now();
-          console.log(
-            `\n[refresh] ⚠ rate-limited ${consecutiveRateLimits}回連続 → ${RATE_LIMIT_COOLDOWN_MS / 1000}秒クールダウン`,
-          );
-          await sleep(RATE_LIMIT_COOLDOWN_MS);
-          consecutiveRateLimits = 0;
-        }
-        if (attempt < MAX_RETRIES) {
-          const wait = 3000 * Math.pow(2, attempt); // 3s, 6s, 12s
-          await sleep(wait);
-          continue;
-        }
-      }
-      break;
+  try {
+    const raw = await stooqChartWithRetry(stock.code, {
+      retries: 2,
+      timeoutMs: FETCH_TIMEOUT_MS,
+      backoffMs: 2000,
+    });
+    const bars = sliceRecent(raw.bars, 252);
+    if (bars.length < 30) {
+      // データ不足（最低 30 営業日は欲しい — RSI, SMA25 が計算できない）
+      const key = 'insufficient bars (<30)';
+      failReasons.set(key, (failReasons.get(key) ?? 0) + 1);
+      return null;
     }
-  }
-  if (lastErr) {
-    const msg = lastErr.message.slice(0, 60);
+    return buildMandala({
+      code: stock.code,
+      name: stock.name,
+      sector: stock.sector,
+      chart: { ticker: raw.ticker, bars },
+      summary: null,
+    });
+  } catch (e) {
+    const err = e as Error;
+    const msg = err.message.slice(0, 80);
     if (sampleErrors.length < 3) {
-      console.error(`  ✗ ${stock.code} ${stock.name}: ${lastErr.message.slice(0, 200)}`);
+      console.error(`  ✗ ${stock.code} ${stock.name}: ${msg}`);
       sampleErrors.push(stock.code);
     }
-    const key = msg.replace(/[\d.]+/g, 'N');
+    // メッセージ中の数値は集計用に伏せる
+    const key = (e instanceof StooqError ? '[Stooq] ' : '') + msg.replace(/[\d.]+/g, 'N');
     failReasons.set(key, (failReasons.get(key) ?? 0) + 1);
+    return null;
   }
-  return null;
 }
 
 function toSlim(r: MandalaResult): SlimRankingEntry {
@@ -191,8 +174,9 @@ async function main() {
   await loadDotenv();
   const startedAt = Date.now();
   console.log(`[refresh] starting @ ${new Date().toISOString()}`);
+  console.log(`[refresh] data source: Stooq (https://stooq.com)`);
   console.log(`[refresh] universe: ${UNIVERSE.length} stocks`);
-  console.log(`[refresh] concurrency: ${CONCURRENCY}, sleep: ${SLEEP_MS}ms`);
+  console.log(`[refresh] concurrency: ${CONCURRENCY}, sleep: ${SLEEP_MS}ms, timeout: ${FETCH_TIMEOUT_MS}ms`);
 
   if (!isKvEnabled()) {
     console.error('[refresh] ERROR: UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN が未設定');
@@ -218,15 +202,15 @@ async function main() {
     const r = await computeOne(s);
     done++;
     if (r) succeeded++;
-    if (done - lastLog >= LOG_INTERVAL || done === UNIVERSE.length) {
+    if (done - lastLog >= LOG_INTERVAL || done === targetUniverse.length) {
       const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0);
       console.log(
-        `  [${done}/${UNIVERSE.length}] elapsed ${elapsed}s ok=${succeeded} fail=${done - succeeded}` +
+        `  [${done}/${targetUniverse.length}] elapsed ${elapsed}s ok=${succeeded} fail=${done - succeeded}` +
           (r ? ` last=${s.code} score=${r.totalScore.toFixed(0)}` : ` last=${s.code}(fail)`),
       );
       lastLog = done;
     }
-    await sleep(SLEEP_MS);
+    if (SLEEP_MS > 0) await sleep(SLEEP_MS);
     return r;
   });
 
@@ -291,6 +275,7 @@ async function main() {
       universeSize: targetUniverse.length,
       durationMs: Date.now() - startedAt,
       finishedAt: new Date().toISOString(),
+      source: 'stooq',
     },
     7 * 24 * 60 * 60,
   );

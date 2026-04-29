@@ -36,8 +36,8 @@ interface MandalaResult {
 }
 
 // 中央 3x3 における 8 カテゴリの配置順 (row-major、index 4 = 中心銘柄)
-// [growth, profitability, valuation, health, [center], momentum, technical, volume, forecast]
-const CENTER_CAT_ORDER = ['growth', 'profitability', 'valuation', 'health', null, 'momentum', 'technical', 'volume', 'forecast'];
+// [growth, profitability, valuation, health, [center], momentum, technical, volume, attention]
+const CENTER_CAT_ORDER = ['growth', 'profitability', 'valuation', 'health', null, 'momentum', 'technical', 'volume', 'attention'];
 
 export default function MandalaPage({ params }: { params: Promise<{ ticker: string }> }) {
   const { ticker } = use(params);

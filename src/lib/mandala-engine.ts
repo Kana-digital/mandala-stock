@@ -7,9 +7,16 @@
  *
  * 全 81 セルにラベル・値・スコア(0-100)・コメントを持たせる。
  * ランキングは「8 カテゴリ総合点の合計（最大 800）」でソート。
+ *
+ * データソース:
+ *  - chart (StooqChart 互換): 株価・出来高 → momentum, technical, volume, attention
+ *  - summary (YfSummary 互換): ファンダメンタル → growth, profitability, valuation, health
+ *      summary は省略可。null の場合はファンダ系カテゴリは「データなし」として 0 点扱い。
+ *
+ * 旧 forecast カテゴリは attention カテゴリ（出来高サージ + ボラ + 52週高値ブレイク等）に置換した。
+ * 個別アナリスト目標は無料で取得できる正規ソースが存在しないため。
  */
 
-import type { YfChart, YfSummary } from './clients/yahoo';
 import {
   ema,
   macd,
@@ -21,6 +28,76 @@ import {
   volumeRatio,
 } from './indicators';
 
+// ───────── 入力型（Yahoo / Stooq 共通の最小契約） ─────────
+
+export interface ChartBar {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface MandalaChart {
+  ticker: string;
+  bars: ChartBar[];
+}
+
+/**
+ * ファンダメンタルサマリー。
+ * 旧 yahoo.ts の YfSummary と同一フィールド構成にしているので互換が効く。
+ * 取得元は J-Quants statements 等から合成して渡す（任意・null 可）。
+ */
+export interface MandalaSummary {
+  price: number | null;
+  currency: string | null;
+  longName: string | null;
+  sector: string | null;
+  industry: string | null;
+
+  targetMeanPrice: number | null;
+  targetHighPrice: number | null;
+  targetLowPrice: number | null;
+  recommendationMean: number | null;
+  numberOfAnalystOpinions: number | null;
+  totalRevenue: number | null;
+  revenueGrowth: number | null;
+  earningsGrowth: number | null;
+  grossMargins: number | null;
+  operatingMargins: number | null;
+  profitMargins: number | null;
+  returnOnEquity: number | null;
+  returnOnAssets: number | null;
+  debtToEquity: number | null;
+  currentRatio: number | null;
+  quickRatio: number | null;
+  freeCashflow: number | null;
+  operatingCashflow: number | null;
+
+  trailingPE: number | null;
+  forwardPE: number | null;
+  priceToBook: number | null;
+  priceToSales: number | null;
+  beta: number | null;
+  marketCap: number | null;
+  trailingEps: number | null;
+  forwardEps: number | null;
+  pegRatio: number | null;
+  fiftyTwoWeekChange: number | null;
+
+  dividendYield: number | null;
+  payoutRatio: number | null;
+  averageVolume: number | null;
+  averageVolume10days: number | null;
+  fiftyTwoWeekHigh: number | null;
+  fiftyTwoWeekLow: number | null;
+
+  epsForecastCurrentYear: number | null;
+}
+
+// ───────── 出力型 ─────────
+
 export type CategoryKey =
   | 'growth'
   | 'profitability'
@@ -29,7 +106,7 @@ export type CategoryKey =
   | 'momentum'
   | 'technical'
   | 'volume'
-  | 'forecast';
+  | 'attention';
 
 export interface MandalaCell {
   /** 表示ラベル */
@@ -60,11 +137,11 @@ export interface MandalaResult {
   sector: string | null;
   /** 現在株価 */
   price: number;
-  /** アナリストコンセンサスtarget */
+  /** アナリストコンセンサスtarget (廃止 — 互換のため保持、常に null) */
   targetMeanPrice: number | null;
-  /** 上昇率% (target / price - 1) * 100 */
+  /** 上昇率% (target / price - 1) * 100 (廃止 — 互換のため保持、常に null) */
   analystUpsidePct: number | null;
-  /** 計算ベースの予測株価（ファンダメンタル+テクニカルのハイブリッド） */
+  /** 計算ベースの予測株価（テクニカル + 注目度 + (任意で)ファンダのハイブリッド） */
   predictedPrice: number;
   /** 予測上昇率% */
   predictedUpsidePct: number;
@@ -97,6 +174,8 @@ const fmt = {
     v == null || !Number.isFinite(v) ? '—' : `${v.toFixed(digits)}倍`,
   count: (v: number | null): string =>
     v == null || !Number.isFinite(v) ? '—' : Math.round(v).toLocaleString(),
+  ratio: (v: number | null, digits = 2): string =>
+    v == null || !Number.isFinite(v) ? '—' : `×${v.toFixed(digits)}`,
 };
 
 const clamp = (n: number, lo = 0, hi = 100): number => Math.max(lo, Math.min(hi, n));
@@ -135,13 +214,17 @@ export function buildMandala(args: {
   code: string;
   name: string;
   sector: string;
-  chart: YfChart;
-  summary: YfSummary;
+  chart: MandalaChart;
+  /** 任意。J-Quants 等から合成したファンダ。未指定ならファンダ系カテゴリは 0 点扱い */
+  summary?: MandalaSummary | null;
 }): MandalaResult {
-  const { code, name, sector, chart, summary } = args;
+  const { code, name, sector, chart } = args;
+  const summary = args.summary ?? null;
   const closes = chart.bars.map((b) => b.close);
+  const highs = chart.bars.map((b) => b.high);
+  const lows = chart.bars.map((b) => b.low);
   const volumes = chart.bars.map((b) => b.volume);
-  const price = summary.price ?? closes[closes.length - 1] ?? 0;
+  const price = summary?.price ?? closes[closes.length - 1] ?? 0;
 
   // 各カテゴリを構築
   const growth = buildGrowth(summary);
@@ -151,16 +234,15 @@ export function buildMandala(args: {
   const momentum = buildMomentum(closes);
   const technical = buildTechnical(closes);
   const volume = buildVolume(volumes, closes);
-  const forecast = buildForecast(summary, price);
+  const attention = buildAttention(closes, volumes, highs, lows);
 
-  const categories: CategoryBlock[] = [growth, profitability, valuation, health, momentum, technical, volume, forecast];
+  const categories: CategoryBlock[] = [growth, profitability, valuation, health, momentum, technical, volume, attention];
   const totalScore = categories.reduce((a, c) => a + c.score, 0);
 
   // 中央 3x3 配置 (Lotus Blossom 標準: 中央=銘柄、周囲8=各カテゴリ)
-  // 配列順は左上→右上→右下→左下→中央 等任意。ここでは row-major (0..8) で:
   // [growth, profit, valuation,
   //  health, [center stock], momentum,
-  //  technical, volume, forecast]
+  //  technical, volume, attention]
   const centerCells: MandalaCell[] = [
     catSummaryCell(growth),
     catSummaryCell(profitability),
@@ -170,29 +252,32 @@ export function buildMandala(args: {
       label: name,
       display: fmt.price(price),
       score: null,
-      hint: `${code} / ${sector ?? summary.sector ?? '—'}`,
+      hint: `${code} / ${sector ?? summary?.sector ?? '—'}`,
     },
     catSummaryCell(momentum),
     catSummaryCell(technical),
     catSummaryCell(volume),
-    catSummaryCell(forecast),
+    catSummaryCell(attention),
   ];
 
-  // 予測株価: ファンダ50% + テクニカル30% + analyst 20%
-  const predictedPrice = computePredictedPrice({ price, summary, technicalScore: technical.score, totalScore });
+  // 予測株価
+  const predictedPrice = computePredictedPrice({
+    price,
+    summary,
+    technicalScore: technical.score,
+    attentionScore: attention.score,
+    totalScore,
+  });
   const predictedUpsidePct = price > 0 ? ((predictedPrice - price) / price) * 100 : 0;
-  const analystUpsidePct = summary.targetMeanPrice && price > 0
-    ? ((summary.targetMeanPrice - price) / price) * 100
-    : null;
 
   return {
     ticker: `${code}.T`,
     code,
     name,
-    sector: sector ?? summary.sector,
+    sector: sector ?? summary?.sector ?? null,
     price,
-    targetMeanPrice: summary.targetMeanPrice,
-    analystUpsidePct,
+    targetMeanPrice: null,
+    analystUpsidePct: null,
     predictedPrice,
     predictedUpsidePct,
     categories,
@@ -210,15 +295,34 @@ function catSummaryCell(c: CategoryBlock): MandalaCell {
   };
 }
 
-// ───────────────────────── カテゴリ別ビルダ ─────────────────────────
+// ───────────────────────── ファンダ系カテゴリ（summary 任意） ─────────────────────────
 
-function buildGrowth(s: YfSummary): CategoryBlock {
+/** summary が null のときに使うフォールバックメトリック */
+function blank(label: string, hint = 'データ未取得'): MandalaCell {
+  return { label, display: '—', score: 0, raw: null, hint };
+}
+
+function buildGrowth(s: MandalaSummary | null): CategoryBlock {
+  if (!s) {
+    const cells: MandalaCell[] = [
+      blank('売上成長(YoY)'),
+      blank('利益成長(YoY)'),
+      blank('粗利率'),
+      blank('営業利益率'),
+      centerCell('成長性', ''),
+      blank('純利益率'),
+      blank('売上規模'),
+      blank('FCF'),
+      blank('予想EPS'),
+    ];
+    return finalize('growth', '成長性', cells);
+  }
   const cells: MandalaCell[] = [
     metric('売上成長(YoY)', fmt.pct(s.revenueGrowth), s.revenueGrowth, scoreUp(s.revenueGrowth, -0.05, 0.20)),
     metric('利益成長(YoY)', fmt.pct(s.earningsGrowth), s.earningsGrowth, scoreUp(s.earningsGrowth, -0.10, 0.30)),
     metric('粗利率', fmt.pct(s.grossMargins), s.grossMargins, scoreUp(s.grossMargins, 0.05, 0.50)),
     metric('営業利益率', fmt.pct(s.operatingMargins), s.operatingMargins, scoreUp(s.operatingMargins, 0.0, 0.25)),
-    centerCell(`成長性`, ''), // index 4
+    centerCell('成長性', ''),
     metric('純利益率', fmt.pct(s.profitMargins), s.profitMargins, scoreUp(s.profitMargins, 0.0, 0.20)),
     metric('売上規模', fmt.yen(s.totalRevenue), s.totalRevenue, scoreUp(s.totalRevenue ? Math.log10(s.totalRevenue) : null, 9, 14)),
     metric('FCF', fmt.yen(s.freeCashflow), s.freeCashflow, s.freeCashflow != null ? scoreUp(s.freeCashflow > 0 ? Math.log10(s.freeCashflow) : null, 8, 13) : null),
@@ -227,7 +331,21 @@ function buildGrowth(s: YfSummary): CategoryBlock {
   return finalize('growth', '成長性', cells);
 }
 
-function buildProfitability(s: YfSummary): CategoryBlock {
+function buildProfitability(s: MandalaSummary | null): CategoryBlock {
+  if (!s) {
+    const cells: MandalaCell[] = [
+      blank('ROE'),
+      blank('ROA'),
+      blank('営業利益率'),
+      blank('純利益率'),
+      centerCell('収益性', ''),
+      blank('粗利率'),
+      blank('営業CF'),
+      blank('FCF'),
+      blank('実績EPS'),
+    ];
+    return finalize('profitability', '収益性', cells);
+  }
   const cells: MandalaCell[] = [
     metric('ROE', fmt.pct(s.returnOnEquity), s.returnOnEquity, scoreUp(s.returnOnEquity, 0.03, 0.20)),
     metric('ROA', fmt.pct(s.returnOnAssets), s.returnOnAssets, scoreUp(s.returnOnAssets, 0.01, 0.10)),
@@ -242,7 +360,21 @@ function buildProfitability(s: YfSummary): CategoryBlock {
   return finalize('profitability', '収益性', cells);
 }
 
-function buildValuation(s: YfSummary): CategoryBlock {
+function buildValuation(s: MandalaSummary | null): CategoryBlock {
+  if (!s) {
+    const cells: MandalaCell[] = [
+      blank('PER (実績)'),
+      blank('PER (予想)'),
+      blank('PBR'),
+      blank('PSR'),
+      centerCell('割安度', ''),
+      blank('PEGレシオ'),
+      blank('時価総額'),
+      blank('実績EPS'),
+      blank('予想EPS'),
+    ];
+    return finalize('valuation', '割安度', cells);
+  }
   const cells: MandalaCell[] = [
     metric('PER (実績)', fmt.multiple(s.trailingPE), s.trailingPE, scoreDown(s.trailingPE, 8, 30)),
     metric('PER (予想)', fmt.multiple(s.forwardPE), s.forwardPE, scoreDown(s.forwardPE, 6, 25)),
@@ -257,8 +389,21 @@ function buildValuation(s: YfSummary): CategoryBlock {
   return finalize('valuation', '割安度', cells);
 }
 
-function buildHealth(s: YfSummary): CategoryBlock {
-  // debtToEquity は%で来る場合あり。100超は危険水準
+function buildHealth(s: MandalaSummary | null): CategoryBlock {
+  if (!s) {
+    const cells: MandalaCell[] = [
+      blank('自己資本比率(代理:1/(1+D/E))'),
+      blank('D/Eレシオ'),
+      blank('流動比率'),
+      blank('当座比率'),
+      centerCell('財務健全性', ''),
+      blank('営業CF'),
+      blank('FCF'),
+      blank('時価総額'),
+      blank('β（市場感応度）'),
+    ];
+    return finalize('health', '財務健全性', cells);
+  }
   const dte = s.debtToEquity;
   const cells: MandalaCell[] = [
     metric('自己資本比率(代理:1/(1+D/E))', fmt.pct(dte != null ? 1 / (1 + dte / 100) : null), dte != null ? 1 / (1 + dte / 100) : null, scoreUp(dte != null ? 1 / (1 + dte / 100) : null, 0.2, 0.7)),
@@ -273,6 +418,8 @@ function buildHealth(s: YfSummary): CategoryBlock {
   ];
   return finalize('health', '財務健全性', cells);
 }
+
+// ───────────────────────── チャート系カテゴリ ─────────────────────────
 
 function buildMomentum(closes: number[]): CategoryBlock {
   const r1m = periodReturn(closes, 21);
@@ -351,21 +498,125 @@ function buildVolume(volumes: number[], closes: number[]): CategoryBlock {
   return finalize('volume', '出来高', cells);
 }
 
-function buildForecast(s: YfSummary, price: number): CategoryBlock {
-  const upside = s.targetMeanPrice && price > 0 ? ((s.targetMeanPrice - price) / price) * 100 : null;
-  const yieldPct = s.dividendYield != null ? s.dividendYield * 100 : null;
+/**
+ * 注目度カテゴリ — チャートのみから「市場の関心が急上昇しているか」を測る。
+ * 旧 forecast カテゴリ（アナリスト目標）の代替。
+ *
+ * 8 指標:
+ *  1. 出来高サージ (5日平均 / 100日平均)
+ *  2. 出来高 z-score (直近 vs 60日平均/SD)
+ *  3. 52週高値ブレイク距離 (近いほど高得点)
+ *  4. 52週レンジ位置
+ *  5. ボラ急上昇率 (10日ボラ / 60日ボラ)
+ *  6. 連続陽線/陰線 streak
+ *  7. ATR/価格 (相対値動き)
+ *  8. 1週 + 1ヶ月の合成モメンタム
+ */
+function buildAttention(closes: number[], volumes: number[], highs: number[], lows: number[]): CategoryBlock {
+  const n = closes.length;
+
+  // 1. 出来高サージ: 5日平均 / 100日平均（または 20日にフォールバック）
+  const surge = volumeSurge(volumes, 5, n >= 100 ? 100 : 20);
+
+  // 2. 出来高 z-score: 直近1日が60日平均から何σ離れているか
+  const zScore = volumeZScore(volumes, 60);
+
+  // 3. 52週高値からの距離 (%) — 高値に近いほど良い
+  const distFromHigh = distanceFromHigh(closes, 252);
+
+  // 4. 52週レンジ位置
+  const range = range52w(closes);
+
+  // 5. ボラ急上昇率
+  const v10 = volatility(closes, 10);
+  const v60 = volatility(closes, 60);
+  const volRatio = v10 != null && v60 != null && v60 > 0 ? v10 / v60 : null;
+
+  // 6. 連続陽線 streak (直近 30 日内、最大連続上昇日数)
+  const streak = upStreak(closes);
+
+  // 7. ATR/価格 (14日 True Range の平均 / 直近終値)
+  const atrPct = atrPercent(highs, lows, closes, 14);
+
+  // 8. 短期合成モメンタム (1w + 1m / 2)
+  const r1w = periodReturn(closes, 5);
+  const r1m = periodReturn(closes, 21);
+  const compMom =
+    r1w != null && r1m != null ? (r1w + r1m) / 2 : (r1w ?? r1m ?? null);
+
   const cells: MandalaCell[] = [
-    metric('目標平均株価', fmt.price(s.targetMeanPrice), s.targetMeanPrice, null),
-    metric('目標上値', fmt.price(s.targetHighPrice), s.targetHighPrice, null),
-    metric('目標下値', fmt.price(s.targetLowPrice), s.targetLowPrice, null),
-    metric('上昇余地', fmt.pctRaw(upside), upside, scoreUp(upside, -10, 30)),
-    centerCell('予想・配当', ''),
-    metric('推奨平均', fmt.num(s.recommendationMean, 2), s.recommendationMean, scoreDown(s.recommendationMean, 1, 4)), // 1=Strong Buy
-    metric('カバーアナリスト数', fmt.count(s.numberOfAnalystOpinions), s.numberOfAnalystOpinions, scoreUp(s.numberOfAnalystOpinions, 0, 25)),
-    metric('配当利回り', fmt.pctRaw(yieldPct), yieldPct, scoreUp(yieldPct, 0, 5)),
-    metric('配当性向', fmt.pct(s.payoutRatio), s.payoutRatio, scoreCentered(s.payoutRatio, 0.4, 0.4)),
+    metric('出来高サージ', fmt.ratio(surge), surge, scoreUp(surge, 0.7, 3.0)),
+    metric('出来高Zスコア', fmt.num(zScore, 2), zScore, scoreUp(zScore, -1, 4)),
+    metric('52週高値距離', fmt.pctRaw(distFromHigh != null ? -distFromHigh * 100 : null), distFromHigh, scoreUp(distFromHigh != null ? -distFromHigh : null, -0.30, 0)),
+    metric('52週レンジ位置', fmt.pctRaw(range != null ? range * 100 : null, 0), range, range != null ? clamp(range * 100) : null),
+    centerCell('注目度', '出来高サージ + 高値接近 + ボラ急騰'),
+    metric('ボラ急騰率', fmt.ratio(volRatio), volRatio, scoreUp(volRatio, 0.7, 2.5)),
+    metric('連続上昇日数', streak != null ? `${streak}日` : '—', streak, scoreUp(streak, 0, 7)),
+    metric('ATR/価格', fmt.pctRaw(atrPct != null ? atrPct * 100 : null), atrPct, scoreUp(atrPct, 0.005, 0.05)),
+    metric('短期合成モメンタム', fmt.pctRaw(compMom), compMom, scoreUp(compMom, -8, 12)),
   ];
-  return finalize('forecast', '予想・配当', cells);
+  return finalize('attention', '注目度', cells);
+}
+
+// ───────────────────────── attention 用ヘルパ ─────────────────────────
+
+function volumeSurge(volumes: number[], shortPeriod: number, longPeriod: number): number | null {
+  if (volumes.length < longPeriod + 1) return null;
+  const tail = volumes.slice(-shortPeriod);
+  const long = volumes.slice(-longPeriod);
+  const tAvg = tail.reduce((a, b) => a + b, 0) / tail.length;
+  const lAvg = long.reduce((a, b) => a + b, 0) / long.length;
+  if (lAvg === 0) return null;
+  return tAvg / lAvg;
+}
+
+function volumeZScore(volumes: number[], period: number): number | null {
+  if (volumes.length < period + 1) return null;
+  const slice = volumes.slice(-(period + 1), -1); // 直近 1 日を除外
+  if (slice.length < period) return null;
+  const mean = slice.reduce((a, b) => a + b, 0) / slice.length;
+  const v = slice.reduce((a, b) => a + (b - mean) ** 2, 0) / slice.length;
+  const sd = Math.sqrt(v);
+  if (sd === 0) return null;
+  const last = volumes[volumes.length - 1];
+  return (last - mean) / sd;
+}
+
+/** 52週高値からどれだけ下にいるか（0 = 高値、+0.30 = 30%下、負ならブレイク） */
+function distanceFromHigh(closes: number[], period: number): number | null {
+  if (closes.length === 0) return null;
+  const slice = closes.slice(-Math.min(period, closes.length));
+  const hi = Math.max(...slice);
+  if (hi === 0) return null;
+  return (hi - closes[closes.length - 1]) / hi;
+}
+
+function upStreak(closes: number[]): number | null {
+  if (closes.length < 2) return null;
+  let streak = 0;
+  for (let i = closes.length - 1; i > 0 && i > closes.length - 30; i--) {
+    if (closes[i] > closes[i - 1]) streak++;
+    else break;
+  }
+  return streak;
+}
+
+function atrPercent(highs: number[], lows: number[], closes: number[], period: number): number | null {
+  if (closes.length < period + 1) return null;
+  const trs: number[] = [];
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const h = highs[i];
+    const l = lows[i];
+    const pc = closes[i - 1];
+    if (h == null || l == null || pc == null) continue;
+    const tr = Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc));
+    trs.push(tr);
+  }
+  if (trs.length === 0) return null;
+  const atr = trs.reduce((a, b) => a + b, 0) / trs.length;
+  const last = closes[closes.length - 1];
+  if (last <= 0) return null;
+  return atr / last;
 }
 
 // ───────────────────────── 共通 ─────────────────────────
@@ -389,17 +640,36 @@ function finalize(key: CategoryKey, name: string, cells: MandalaCell[]): Categor
 
 // ───────────────────────── 予測株価 ─────────────────────────
 
-function computePredictedPrice(args: { price: number; summary: YfSummary; technicalScore: number; totalScore: number }): number {
-  const { price, summary, technicalScore, totalScore } = args;
-  // 1. アナリスト目標
-  const analyst = summary.targetMeanPrice ?? price;
-  // 2. ファンダ理論株価: 予想EPS × セクター平均PER相当(15)
-  const epsBase = summary.forwardEps ?? summary.trailingEps ?? null;
-  const fundamental = epsBase ? epsBase * 15 : price;
-  // 3. テクニカル: 現在価格 × (1 + (technicalScore - 50)/200) で ±25%まで補正
+function computePredictedPrice(args: {
+  price: number;
+  summary: MandalaSummary | null;
+  technicalScore: number;
+  attentionScore: number;
+  totalScore: number;
+}): number {
+  const { price, summary, technicalScore, attentionScore, totalScore } = args;
+  if (price <= 0) return 0;
+
+  // 1. ファンダ理論株価: 予想EPS × 15 (summary なしならスキップ)
+  const epsBase = summary?.forwardEps ?? summary?.trailingEps ?? null;
+  const fundamental = epsBase ? epsBase * 15 : null;
+
+  // 2. テクニカル: 現在価格 × (1 + (technicalScore - 50)/200) で ±25%まで補正
   const tech = price * (1 + (technicalScore - 50) / 200);
-  // 4. 総合補正: totalScore (0-800) で全体の楽観度を上下
-  const optimism = (totalScore - 400) / 800; // -0.5 〜 +0.5
-  const blend = analyst * 0.40 + fundamental * 0.35 + tech * 0.25;
+
+  // 3. 注目度補正: attention が高い銘柄は短期上振れを織り込む（最大 +12%）
+  const att = price * (1 + (attentionScore - 50) / 250);
+
+  // 4. ブレンド
+  let blend: number;
+  if (fundamental != null) {
+    blend = fundamental * 0.40 + tech * 0.35 + att * 0.25;
+  } else {
+    // ファンダ無しならテクニカル + 注目度 + 現在価格を均等
+    blend = price * 0.40 + tech * 0.35 + att * 0.25;
+  }
+
+  // 5. 総合楽観度補正 (totalScore 0-800 → ±10%)
+  const optimism = (totalScore - 400) / 800;
   return blend * (1 + optimism * 0.10);
 }

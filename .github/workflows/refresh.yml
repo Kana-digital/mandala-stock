@@ -14,7 +14,9 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # 全 ~3,600 銘柄を控えめ並列で取得（クールダウン込み）
+    # Stooq は Yahoo より安定しているが、~3,600 銘柄を控えめ並列で
+    # 取得する想定なので 90 分を上限にする（実測 ~30〜45 分の見込み）
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -33,9 +35,10 @@ jobs:
         env:
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-          # GH IP は共有のため特に控えめ
-          REFRESH_CONCURRENCY: '2'
-          REFRESH_SLEEP_MS: '500'
+          # Stooq の許容範囲を尊重しつつ、3,589 銘柄を 1 時間内に終わらせる
+          REFRESH_CONCURRENCY: '8'
+          REFRESH_SLEEP_MS: '60'
+          REFRESH_TIMEOUT_MS: '15000'
         run: npm run refresh
 
       - name: Summary
@@ -44,3 +47,4 @@ jobs:
           echo "## Refresh result" >> $GITHUB_STEP_SUMMARY
           echo "- Finished at: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Source: Stooq (https://stooq.com)" >> $GITHUB_STEP_SUMMARY
