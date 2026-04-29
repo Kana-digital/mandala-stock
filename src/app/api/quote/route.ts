@@ -34,7 +34,12 @@ export async function GET(req: NextRequest) {
       ]);
       const daily = quotes.map((q) => ({
         date: q.Date,
-        o: q.Open, h: q.High, l: q.Low, c: q.Close, v: q.Volume,
+        // 調整済み価格を優先（分割対応）。Adj* が無ければ生値にフォールバック
+        o: q.AdjO ?? q.O,
+        h: q.AdjH ?? q.H,
+        l: q.AdjL ?? q.L,
+        c: q.AdjC ?? q.C,
+        v: q.AdjVo ?? q.Vo,
       }));
       return { info, daily };
     });

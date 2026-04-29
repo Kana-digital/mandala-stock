@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
     const data = await withCache(`fundamental:${ticker}`, 6 * 60 * 60 * 1000, async () => {
       const code = ticker.padEnd(5, '0');
       const statements = await fetchStatements(code);
-      const sorted = [...statements].sort((a, b) => (a.DisclosedDate < b.DisclosedDate ? 1 : -1));
+      const sorted = [...statements].sort((a, b) => (a.DiscDate < b.DiscDate ? 1 : -1));
       return { latest: sorted[0] ?? null, history: sorted.slice(0, 12) };
     });
     return jsonResponse(data, { sMaxAge: 6 * 60 * 60 });

@@ -40,19 +40,21 @@ export async function GET(req: NextRequest) {
 
       const daily = quotes.map((q) => ({
         date: q.Date,
-        o: q.Open,
-        h: q.High,
-        l: q.Low,
-        c: q.Close,
-        v: q.Volume,
+        // 調整済み価格を優先（分割対応）
+        o: q.AdjO ?? q.O,
+        h: q.AdjH ?? q.H,
+        l: q.AdjL ?? q.L,
+        c: q.AdjC ?? q.C,
+        v: q.AdjVo ?? q.Vo,
       }));
       const lastClose = daily.length ? (daily[daily.length - 1].c ?? 0) : 0;
 
       // 財務: 直近 + 4期前 から YoY を計算
-      const sorted = [...statements].sort((a, b) => (a.DisclosedDate < b.DisclosedDate ? 1 : -1));
+      const sorted = [...statements].sort((a, b) => (a.DiscDate < b.DiscDate ? 1 : -1));
       const latest = sorted[0];
       const yearAgo = sorted[4];
-      const num = (s?: string) => (s == null || s === '' ? NaN : Number(s));
+      const num = (v: string | number | null | undefined) =>
+        v == null || v === '' ? NaN : typeof v === 'number' ? v : Number(v);
 
       const yoy = (cur: number, prev: number) =>
         Number.isFinite(cur) && Number.isFinite(prev) && prev !== 0
@@ -60,18 +62,18 @@ export async function GET(req: NextRequest) {
           : null;
 
       const fundamental: FundamentalSnapshot = {
-        salesGrowthYoY: latest && yearAgo ? yoy(num(latest.NetSales), num(yearAgo.NetSales)) : null,
-        opGrowthYoY: latest && yearAgo ? yoy(num(latest.OperatingProfit), num(yearAgo.OperatingProfit)) : null,
-        epsGrowthYoY: latest && yearAgo ? yoy(num(latest.EarningsPerShare), num(yearAgo.EarningsPerShare)) : null,
-        opMargin: latest && num(latest.NetSales) > 0 ? (num(latest.OperatingProfit) / num(latest.NetSales)) * 100 : null,
-        forecastEPS: latest ? (Number.isFinite(num(latest.ForecastEarningsPerShare)) ? num(latest.ForecastEarningsPerShare) : null) : null,
-        trailingEPS: latest ? (Number.isFinite(num(latest.EarningsPerShare)) ? num(latest.EarningsPerShare) : null) : null,
-        sectorCode: info?.Sector33CodeName,
+        salesGrowthYoY: latest && yearAgo ? yoy(num(latest.Sales), num(yearAgo.Sales)) : null,
+        opGrowthYoY: latest && yearAgo ? yoy(num(latest.OP), num(yearAgo.OP)) : null,
+        epsGrowthYoY: latest && yearAgo ? yoy(num(latest.EPS), num(yearAgo.EPS)) : null,
+        opMargin: latest && num(latest.Sales) > 0 ? (num(latest.OP) / num(latest.Sales)) * 100 : null,
+        forecastEPS: latest ? (Number.isFinite(num(latest.FEPS)) ? num(latest.FEPS) : null) : null,
+        trailingEPS: latest ? (Number.isFinite(num(latest.EPS)) ? num(latest.EPS) : null) : null,
+        sectorCode: info?.S33Nm,
       };
 
       const input: ScreenInput = {
         ticker,
-        name: name || info?.CompanyName || ticker,
+        name: name || info?.CoName || ticker,
         price: lastClose,
         daily,
         fundamental,

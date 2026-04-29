@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
       ]);
       if (!target) return { sector: null, competitors: [] };
       return {
-        sector: target.Sector33CodeName ?? null,
+        sector: target.S33Nm ?? null,
         competitors: pickSameSector(all, target, 5),
       };
     });

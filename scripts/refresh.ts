@@ -162,7 +162,7 @@ async function computeOne(
 
     // 業種は J-Quants 側を優先、無ければ universe.json 側
     const sector = summary.sector ?? stock.sector;
-    const name = listedInfo?.CompanyName ?? stock.name;
+    const name = listedInfo?.CoName ?? stock.name;
 
     return buildMandala({
       code,
