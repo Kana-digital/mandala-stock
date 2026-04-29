@@ -30,10 +30,21 @@ interface Paginated<T> {
   pagination_key?: string;
 }
 
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 /**
  * 1 ページ取得（pagination_key を含めて呼ぶこともある）
+ *
+ * 429 が返ってきた場合は Retry-After ヘッダ（または指数バックオフ）に従って自動リトライ。
+ * Free プランでは 1 req / N 秒の厳しいレート制限があるので必須。
  */
-async function jqGetRaw<T>(path: string, query: Record<string, string | undefined>): Promise<Paginated<T>> {
+async function jqGetRaw<T>(
+  path: string,
+  query: Record<string, string | undefined>,
+  attempt = 0,
+): Promise<Paginated<T>> {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(query)) {
     if (v !== undefined && v !== '') params.set(k, v);
@@ -43,6 +54,18 @@ async function jqGetRaw<T>(path: string, query: Record<string, string | undefine
   const res = await fetch(url, {
     headers: { 'x-api-key': getApiKey() },
   });
+
+  // 429 をリトライ。最大 5 回、最大累積待機 ~5 分。
+  if (res.status === 429 && attempt < 5) {
+    const retryAfter = Number(res.headers.get('retry-after'));
+    // Retry-After ヘッダがあれば尊重、無ければ指数バックオフ（10s, 20s, 40s, 80s, 160s）
+    const waitSec = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter, 180)
+      : Math.min(10 * Math.pow(2, attempt), 180);
+    await sleep(waitSec * 1000);
+    return jqGetRaw<T>(path, query, attempt + 1);
+  }
+
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`J-Quants ${path} failed: ${res.status}${body ? ` ${body.slice(0, 200)}` : ''}`);

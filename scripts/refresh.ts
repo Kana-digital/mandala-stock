@@ -253,13 +253,6 @@ async function main() {
     process.exit(1);
   }
 
-  // テスト用: LIMIT=10 で先頭10銘柄だけ処理
-  const limit = Number(process.env.LIMIT ?? UNIVERSE.length);
-  const targetUniverse = limit < UNIVERSE.length ? UNIVERSE.slice(0, limit) : UNIVERSE;
-  if (limit < UNIVERSE.length) {
-    console.log(`[refresh] LIMIT=${limit} → testing with first ${targetUniverse.length} stocks`);
-  }
-
   // ---------- /listed/info を 1 回だけプリフェッチ ----------
   console.log('[refresh] prefetching /listed/info ...');
   let listedInfoMap = new Map<string, JqListedInfo>();
@@ -275,6 +268,33 @@ async function main() {
   } catch (e) {
     console.warn(`[refresh] WARNING: /listed/info プリフェッチ失敗 (${(e as Error).message})。会社名は universe.json 側を使う`);
     listedInfoMap = new Map();
+  }
+
+  // TOPIX 500 (Core30 + Large70 + Mid400) のみに絞る。
+  // J-Quants Free プランのレート制限と GH Actions の実行時間制約上、
+  // 全 3,589 銘柄を取得するのは現実的でないため。
+  // 環境変数 SCALE_FILTER=all で全銘柄に戻せる。
+  const scaleFilter = process.env.SCALE_FILTER ?? 'topix500';
+  const TOPIX500_SCALES = new Set(['TOPIX Core30', 'TOPIX Large70', 'TOPIX Mid400']);
+  let scaleFilteredUniverse = UNIVERSE;
+  if (scaleFilter === 'topix500' && listedInfoMap.size > 0) {
+    scaleFilteredUniverse = UNIVERSE.filter((s) => {
+      const info = listedInfoMap.get(s.code);
+      return info?.ScaleCat && TOPIX500_SCALES.has(info.ScaleCat);
+    });
+    console.log(
+      `[refresh] SCALE_FILTER=topix500 → ${scaleFilteredUniverse.length} stocks (Core30+Large70+Mid400) of ${UNIVERSE.length}`,
+    );
+  } else if (scaleFilter !== 'topix500') {
+    console.log(`[refresh] SCALE_FILTER=${scaleFilter} → using full universe (${UNIVERSE.length})`);
+  }
+
+  // テスト用: LIMIT=10 で先頭10銘柄だけ処理
+  const limit = Number(process.env.LIMIT ?? scaleFilteredUniverse.length);
+  const targetUniverse =
+    limit < scaleFilteredUniverse.length ? scaleFilteredUniverse.slice(0, limit) : scaleFilteredUniverse;
+  if (limit < scaleFilteredUniverse.length) {
+    console.log(`[refresh] LIMIT=${limit} → testing with first ${targetUniverse.length} stocks`);
   }
 
   // 取得期間: Free プランは 12 週遅延が厳格チェックされ、`to` を今日にすると 400 を返す。

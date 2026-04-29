@@ -39,9 +39,14 @@ jobs:
           JQUANTS_REFRESH_TOKEN: ${{ secrets.JQUANTS_REFRESH_TOKEN }}
           # Free プランは 1 リクエスト/秒未満のレート制限あり。安全側で
           # シーケンシャル実行 + 1.5 秒間隔で 429 を回避。
+          # jquants.ts 側で 429 を最大 5 回・指数バックオフ（最大 ~5 分待機）で
+          # リトライするので、外側のタイムアウトはそれ以上に取る必要がある。
           REFRESH_CONCURRENCY: '1'
           REFRESH_SLEEP_MS: '1500'
-          REFRESH_TIMEOUT_MS: '20000'
+          REFRESH_TIMEOUT_MS: '420000'
+          # TOPIX 500 (Core30 + Large70 + Mid400) のみに絞る。
+          # 全 3,589 銘柄を取得したい場合は 'all' に変更。
+          SCALE_FILTER: 'topix500'
         run: npm run refresh
 
       - name: Summary
