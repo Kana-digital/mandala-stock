@@ -44,9 +44,9 @@ jobs:
           REFRESH_CONCURRENCY: '1'
           REFRESH_SLEEP_MS: '1500'
           REFRESH_TIMEOUT_MS: '420000'
-          # TOPIX 500 (Core30 + Large70 + Mid400) のみに絞る。
-          # 全 3,589 銘柄を取得したい場合は 'all' に変更。
-          SCALE_FILTER: 'topix500'
+          # TOPIX 100 (Core30 + Large70) のみに絞る。
+          # 'topix500' = Core30+Large70+Mid400, 'all' = 全銘柄
+          SCALE_FILTER: 'topix100'
         run: npm run refresh
 
       - name: Summary

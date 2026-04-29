@@ -270,14 +270,25 @@ async function main() {
     listedInfoMap = new Map();
   }
 
-  // TOPIX 500 (Core30 + Large70 + Mid400) のみに絞る。
+  // TOPIX サイズ区分でユニバースを絞る。
   // J-Quants Free プランのレート制限と GH Actions の実行時間制約上、
   // 全 3,589 銘柄を取得するのは現実的でないため。
-  // 環境変数 SCALE_FILTER=all で全銘柄に戻せる。
-  const scaleFilter = process.env.SCALE_FILTER ?? 'topix500';
+  //   topix100 = Core30 + Large70 (~100銘柄)
+  //   topix500 = Core30 + Large70 + Mid400 (~500銘柄)
+  //   all      = 全銘柄
+  const scaleFilter = process.env.SCALE_FILTER ?? 'topix100';
+  const TOPIX100_SCALES = new Set(['TOPIX Core30', 'TOPIX Large70']);
   const TOPIX500_SCALES = new Set(['TOPIX Core30', 'TOPIX Large70', 'TOPIX Mid400']);
   let scaleFilteredUniverse = UNIVERSE;
-  if (scaleFilter === 'topix500' && listedInfoMap.size > 0) {
+  if (scaleFilter === 'topix100' && listedInfoMap.size > 0) {
+    scaleFilteredUniverse = UNIVERSE.filter((s) => {
+      const info = listedInfoMap.get(s.code);
+      return info?.ScaleCat && TOPIX100_SCALES.has(info.ScaleCat);
+    });
+    console.log(
+      `[refresh] SCALE_FILTER=topix100 → ${scaleFilteredUniverse.length} stocks (Core30+Large70) of ${UNIVERSE.length}`,
+    );
+  } else if (scaleFilter === 'topix500' && listedInfoMap.size > 0) {
     scaleFilteredUniverse = UNIVERSE.filter((s) => {
       const info = listedInfoMap.get(s.code);
       return info?.ScaleCat && TOPIX500_SCALES.has(info.ScaleCat);
@@ -285,7 +296,7 @@ async function main() {
     console.log(
       `[refresh] SCALE_FILTER=topix500 → ${scaleFilteredUniverse.length} stocks (Core30+Large70+Mid400) of ${UNIVERSE.length}`,
     );
-  } else if (scaleFilter !== 'topix500') {
+  } else {
     console.log(`[refresh] SCALE_FILTER=${scaleFilter} → using full universe (${UNIVERSE.length})`);
   }
 
