@@ -14,9 +14,9 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # J-Quants は GH IP からも通る公式 API。3,589 銘柄を控えめ並列で
-    # 取得する想定で 90 分上限。実測 ~20〜35 分の見込み。
-    timeout-minutes: 90
+    # J-Quants Free プランはレート制限が厳しく、3,589 銘柄を 1.5 秒間隔で
+    # シーケンシャルに取得すると約 90 分。安全マージンとして 180 分上限。
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -37,9 +37,10 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
           # J-Quants V2 API Key（ダッシュボードで発行したもの）。変数名は互換のため REFRESH_TOKEN 名残
           JQUANTS_REFRESH_TOKEN: ${{ secrets.JQUANTS_REFRESH_TOKEN }}
-          # J-Quants V2 はおおむね寛容だが安全側で 3 並列・200ms スリープ
-          REFRESH_CONCURRENCY: '3'
-          REFRESH_SLEEP_MS: '200'
+          # Free プランは 1 リクエスト/秒未満のレート制限あり。安全側で
+          # シーケンシャル実行 + 1.5 秒間隔で 429 を回避。
+          REFRESH_CONCURRENCY: '1'
+          REFRESH_SLEEP_MS: '1500'
           REFRESH_TIMEOUT_MS: '20000'
         run: npm run refresh
 

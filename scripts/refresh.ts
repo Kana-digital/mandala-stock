@@ -62,10 +62,10 @@ import {
   type SlimRankingMeta,
 } from '../src/lib/clients/kv';
 
-// 同時並列数（J-Quants V2 はおおむね寛容だが、安全側で 3）
-const CONCURRENCY = Number(process.env.REFRESH_CONCURRENCY ?? 3);
+// 同時並列数（Free プランはレート制限が厳しいので 1）
+const CONCURRENCY = Number(process.env.REFRESH_CONCURRENCY ?? 1);
 // 各リクエスト後の sleep（ms）
-const SLEEP_MS = Number(process.env.REFRESH_SLEEP_MS ?? 200);
+const SLEEP_MS = Number(process.env.REFRESH_SLEEP_MS ?? 1500);
 // J-Quants からの取得タイムアウト
 const FETCH_TIMEOUT_MS = Number(process.env.REFRESH_TIMEOUT_MS ?? 20000);
 // 進捗ログを出す間隔（銘柄数）
@@ -76,6 +76,9 @@ const RANKING_CHUNK_SIZE = 1000;
 const LEGACY_RANKING_ALL_THRESHOLD = 500;
 // 日足取得期間（営業日 252 ≒ 1.5 年）
 const HISTORY_DAYS = 540; // カレンダー日。土日祝込みでも 252 営業日は確保できる
+// Free プラン: 12 週遅延 → to は今日より 84 日以上前を指定する必要あり
+// （余裕を見て 90 日前にする）
+const FREE_PLAN_DELAY_DAYS = 90;
 
 function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
@@ -274,12 +277,14 @@ async function main() {
     listedInfoMap = new Map();
   }
 
-  // 取得期間: 直近 540 カレンダー日（≒ 1.5 年）→ 252 営業日確保
-  // J-Quants 無料プランは 12 週遅れなので、to は今日でも実際に返ってくるのは 84 日前まで
-  const today = new Date();
-  const fromDate = ymd(new Date(today.getTime() - HISTORY_DAYS * 24 * 60 * 60 * 1000));
-  const toDate = ymd(today);
-  console.log(`[refresh] history range: ${fromDate} → ${toDate} (~${HISTORY_DAYS} days; 12w delay applies on free plan)`);
+  // 取得期間: Free プランは 12 週遅延が厳格チェックされ、`to` を今日にすると 400 を返す。
+  // よって `to = 今日 - 90 日` を上限に固定する（fromもそこから HISTORY_DAYS 遡る）
+  const now = new Date();
+  const toDateObj = new Date(now.getTime() - FREE_PLAN_DELAY_DAYS * 24 * 60 * 60 * 1000);
+  const fromDateObj = new Date(toDateObj.getTime() - HISTORY_DAYS * 24 * 60 * 60 * 1000);
+  const fromDate = ymd(fromDateObj);
+  const toDate = ymd(toDateObj);
+  console.log(`[refresh] history range: ${fromDate} → ${toDate} (~${HISTORY_DAYS} days; to = today - ${FREE_PLAN_DELAY_DAYS}d for free plan delay)`);
 
   // ---------- データ取得 ----------
   let done = 0;
