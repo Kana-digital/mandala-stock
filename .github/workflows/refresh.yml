@@ -14,8 +14,8 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # Stooq は Yahoo より安定しているが、~3,600 銘柄を控えめ並列で
-    # 取得する想定なので 90 分を上限にする（実測 ~30〜45 分の見込み）
+    # J-Quants は GH IP からも通る公式 API。3,589 銘柄を控えめ並列で
+    # 取得する想定で 90 分上限。実測 ~20〜35 分の見込み。
     timeout-minutes: 90
 
     steps:
@@ -35,10 +35,12 @@ jobs:
         env:
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
-          # Stooq の許容範囲を尊重しつつ、3,589 銘柄を 1 時間内に終わらせる
-          REFRESH_CONCURRENCY: '8'
-          REFRESH_SLEEP_MS: '60'
-          REFRESH_TIMEOUT_MS: '15000'
+          # J-Quants V2 API Key（ダッシュボードで発行したもの）。変数名は互換のため REFRESH_TOKEN 名残
+          JQUANTS_REFRESH_TOKEN: ${{ secrets.JQUANTS_REFRESH_TOKEN }}
+          # J-Quants V2 はおおむね寛容だが安全側で 3 並列・200ms スリープ
+          REFRESH_CONCURRENCY: '3'
+          REFRESH_SLEEP_MS: '200'
+          REFRESH_TIMEOUT_MS: '20000'
         run: npm run refresh
 
       - name: Summary
@@ -47,4 +49,4 @@ jobs:
           echo "## Refresh result" >> $GITHUB_STEP_SUMMARY
           echo "- Finished at: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
           echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Source: Stooq (https://stooq.com)" >> $GITHUB_STEP_SUMMARY
+          echo "- Source: J-Quants V2 (https://api.jquants.com/v2)" >> $GITHUB_STEP_SUMMARY

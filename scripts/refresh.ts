@@ -1,30 +1,33 @@
 /**
- * Mandala データ更新スクリプト（Stooq 版・全上場銘柄対応）
+ * Mandala データ更新スクリプト（J-Quants 版・全上場銘柄対応）
  *
  * 使い方:
  *   npm run refresh
  *
  * 動作:
- *   1. src/lib/jp-stocks.json から全銘柄ロード
- *   2. Stooq から並列で日足 CSV を取得（concurrency 8 デフォルト）
- *   3. 失敗銘柄はスキップして続行（ネットワーク系は exponential backoff で 2 回リトライ）
- *   4. 個別マンダラを Upstash に書き込み（mandala:{code}）
- *   5. スリムランキングを 1000 件単位でチャンク保存（ranking:slim:N）
+ *   1. J-Quants /listed/info で全銘柄メタを 1 回だけプリフェッチ → Map<code, JqListedInfo>
+ *   2. src/lib/jp-stocks.json から自分側の銘柄ユニバースをロード
+ *   3. 各銘柄について並列で
+ *      - /equities/bars/daily?from=...&to=... で 1.5 年分の日足を取得
+ *      - /fins/statements?code=... で四半期決算履歴を取得
+ *   4. quotesToChart / buildMandalaSummary で mandala-engine 入力に変換
+ *   5. buildMandala で 81 セルのマンダラを生成
+ *   6. Upstash Redis に書き込み（mandala:{code} と ranking:slim:N）
  *
  * 設計判断:
- *   - Yahoo Finance はクラウド IP（GH Actions / Vercel / 一部 ISP）から完全 IP ブロック中。
- *     2026/04 時点で Mac/macOS launchd / GH runners 双方ともに 429 を返すため使えない。
- *   - 代替として Stooq の無料 CSV API を使う。Stooq は商用クラウド IP も普通に通る。
- *   - ファンダメンタル（PER, ROE 等）は Stooq には無いため、当バージョンは「チャートのみ」運用。
- *     成長性 / 収益性 / 割安度 / 財務健全性 の 4 カテゴリは「データ未取得」として 0 点表示。
- *     必要なら J-Quants /fins/statements を別ジョブで週次同期して合成 summary を構築する。
+ *   - Yahoo / Stooq は 2026/04 時点で GH Actions / Vercel から完全 IP ブロック中
+ *   - J-Quants V2 はクラウド IP 制限なし（公式 API）。x-api-key ヘッダー認証のみ
+ *   - 無料プランは 12 週遅れだが、252 営業日の履歴が取れるので
+ *     RSI / MACD / SMA / 52 週レンジ等のテクニカル系は機能する
+ *   - ファンダは /fins/statements の最新四半期から PER / 利益率 / YoY を合成
+ *     PBR / ROE / D/E などは無料で取れないので null（mandala-engine が「未取得」扱いにする）
  *   - 旧 forecast カテゴリ（アナリスト目標）は廃止し、出来高サージ + 高値接近度 + ボラ急騰の
- *     注目度 attention カテゴリに置換した（mandala-engine.ts 側で実装）。
+ *     注目度 attention カテゴリに置換した（mandala-engine.ts 側で実装）
  *
- * 実行環境:
- *   - GitHub Actions runner → Stooq に通る ✓
- *   - ローカル (Mac) → Stooq に通る ✓
- *   - Vercel Cron Function → 5分制限を超えるので NG（このスクリプトでは使わない）
+ * レート制限:
+ *   - J-Quants V2 はおおむね寛容だが、3,589 銘柄 × 2 リクエスト = 7,178 リクエストを
+ *     一気に投げると 429 を喰う可能性があるので concurrency=3, sleep=200ms を既定値とする
+ *   - 環境変数 REFRESH_CONCURRENCY / REFRESH_SLEEP_MS で調整可能
  */
 
 // dotenv はローカル実行時のみ。GH Actions では env から直接来るので失敗を許容。
@@ -38,7 +41,16 @@ async function loadDotenv() {
   }
 }
 
-import { stooqChartWithRetry, sliceRecent, StooqError } from '../src/lib/clients/stooq';
+import {
+  fetchDailyQuotes,
+  fetchStatements,
+  fetchAllListedInfo,
+  type JqListedInfo,
+} from '../src/lib/clients/jquants';
+import {
+  quotesToChart,
+  buildMandalaSummary,
+} from '../src/lib/adapters/jquants-mandala';
 import { UNIVERSE } from '../src/lib/universe';
 import { buildMandala, type MandalaResult } from '../src/lib/mandala-engine';
 import {
@@ -50,21 +62,27 @@ import {
   type SlimRankingMeta,
 } from '../src/lib/clients/kv';
 
-// 同時並列数（Stooq は Yahoo より寛容。8 並列でも安定するはず）
-const CONCURRENCY = Number(process.env.REFRESH_CONCURRENCY ?? 8);
+// 同時並列数（J-Quants V2 はおおむね寛容だが、安全側で 3）
+const CONCURRENCY = Number(process.env.REFRESH_CONCURRENCY ?? 3);
 // 各リクエスト後の sleep（ms）
-const SLEEP_MS = Number(process.env.REFRESH_SLEEP_MS ?? 60);
-// Stooq からの取得タイムアウト
-const FETCH_TIMEOUT_MS = Number(process.env.REFRESH_TIMEOUT_MS ?? 15000);
+const SLEEP_MS = Number(process.env.REFRESH_SLEEP_MS ?? 200);
+// J-Quants からの取得タイムアウト
+const FETCH_TIMEOUT_MS = Number(process.env.REFRESH_TIMEOUT_MS ?? 20000);
 // 進捗ログを出す間隔（銘柄数）
 const LOG_INTERVAL = 100;
 // スリムランキング 1チャンクあたりのエントリ数
 const RANKING_CHUNK_SIZE = 1000;
 // rankingAll（レガシー）に保存する閾値: ユニバースが小さいときだけ
 const LEGACY_RANKING_ALL_THRESHOLD = 500;
+// 日足取得期間（営業日 252 ≒ 1.5 年）
+const HISTORY_DAYS = 540; // カレンダー日。土日祝込みでも 252 営業日は確保できる
 
 function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+function ymd(d: Date): string {
+  return d.toISOString().slice(0, 10);
 }
 
 async function poolRun<T, R>(
@@ -89,38 +107,79 @@ async function poolRun<T, R>(
 const failReasons: Map<string, number> = new Map();
 const sampleErrors: string[] = [];
 
+/** タイムアウト付き Promise */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timeout (${ms}ms)`)), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch((e) => {
+      clearTimeout(t);
+      reject(e);
+    });
+  });
+}
+
 async function computeOne(
   stock: { code: string; name: string; sector: string },
+  fromDate: string,
+  toDate: string,
+  listedInfoMap: Map<string, JqListedInfo>,
 ): Promise<MandalaResult | null> {
   try {
-    const raw = await stooqChartWithRetry(stock.code, {
-      retries: 2,
-      timeoutMs: FETCH_TIMEOUT_MS,
-      backoffMs: 2000,
-    });
-    const bars = sliceRecent(raw.bars, 252);
-    if (bars.length < 30) {
-      // データ不足（最低 30 営業日は欲しい — RSI, SMA25 が計算できない）
+    // J-Quants は 4 桁コードでも 5 桁コード（末尾 0 付与）でも受け付けるが、
+    // /listed/info は 4 桁で返ってくるケースが多い。揃えるため 4→4 のまま渡す。
+    const code = stock.code;
+
+    // 日足 + 決算を並行取得
+    const [quotes, statements] = await Promise.all([
+      withTimeout(fetchDailyQuotes(code, fromDate, toDate), FETCH_TIMEOUT_MS, `quotes ${code}`),
+      withTimeout(fetchStatements(code), FETCH_TIMEOUT_MS, `statements ${code}`).catch(() => []),
+    ]);
+
+    if (!quotes || quotes.length < 30) {
       const key = 'insufficient bars (<30)';
       failReasons.set(key, (failReasons.get(key) ?? 0) + 1);
       return null;
     }
+
+    const chart = quotesToChart(code, quotes);
+    if (chart.bars.length < 30) {
+      const key = 'insufficient bars after filter (<30)';
+      failReasons.set(key, (failReasons.get(key) ?? 0) + 1);
+      return null;
+    }
+
+    const lastClose = chart.bars[chart.bars.length - 1]?.close ?? null;
+    const listedInfo = listedInfoMap.get(code) ?? null;
+    const summary = buildMandalaSummary({
+      code,
+      listedInfo,
+      statements,
+      lastClose,
+    });
+
+    // 業種は J-Quants 側を優先、無ければ universe.json 側
+    const sector = summary.sector ?? stock.sector;
+    const name = listedInfo?.CompanyName ?? stock.name;
+
     return buildMandala({
-      code: stock.code,
-      name: stock.name,
-      sector: stock.sector,
-      chart: { ticker: raw.ticker, bars },
-      summary: null,
+      code,
+      name,
+      sector,
+      chart,
+      summary,
     });
   } catch (e) {
     const err = e as Error;
-    const msg = err.message.slice(0, 80);
-    if (sampleErrors.length < 3) {
+    const msg = err.message.slice(0, 100);
+    if (sampleErrors.length < 5) {
       console.error(`  ✗ ${stock.code} ${stock.name}: ${msg}`);
       sampleErrors.push(stock.code);
     }
     // メッセージ中の数値は集計用に伏せる
-    const key = (e instanceof StooqError ? '[Stooq] ' : '') + msg.replace(/[\d.]+/g, 'N');
+    const key = msg.replace(/[\d.]+/g, 'N');
     failReasons.set(key, (failReasons.get(key) ?? 0) + 1);
     return null;
   }
@@ -174,10 +233,14 @@ async function main() {
   await loadDotenv();
   const startedAt = Date.now();
   console.log(`[refresh] starting @ ${new Date().toISOString()}`);
-  console.log(`[refresh] data source: Stooq (https://stooq.com)`);
+  console.log(`[refresh] data source: J-Quants V2 (https://api.jquants.com/v2)`);
   console.log(`[refresh] universe: ${UNIVERSE.length} stocks`);
   console.log(`[refresh] concurrency: ${CONCURRENCY}, sleep: ${SLEEP_MS}ms, timeout: ${FETCH_TIMEOUT_MS}ms`);
 
+  if (!process.env.JQUANTS_REFRESH_TOKEN) {
+    console.error('[refresh] ERROR: JQUANTS_REFRESH_TOKEN が未設定。GH Secrets を確認してください');
+    process.exit(1);
+  }
   if (!isKvEnabled()) {
     console.error('[refresh] ERROR: UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN が未設定');
     process.exit(1);
@@ -194,12 +257,36 @@ async function main() {
     console.log(`[refresh] LIMIT=${limit} → testing with first ${targetUniverse.length} stocks`);
   }
 
+  // ---------- /listed/info を 1 回だけプリフェッチ ----------
+  console.log('[refresh] prefetching /listed/info ...');
+  let listedInfoMap = new Map<string, JqListedInfo>();
+  try {
+    const all = await fetchAllListedInfo();
+    for (const info of all) {
+      // J-Quants の Code は 5 桁（末尾 0 付き）で返ってくるケースもあるので両方登録
+      const c4 = info.Code.slice(0, 4);
+      listedInfoMap.set(info.Code, info);
+      listedInfoMap.set(c4, info);
+    }
+    console.log(`[refresh] listedInfo: ${all.length} records (mapped ${listedInfoMap.size} keys)`);
+  } catch (e) {
+    console.warn(`[refresh] WARNING: /listed/info プリフェッチ失敗 (${(e as Error).message})。会社名は universe.json 側を使う`);
+    listedInfoMap = new Map();
+  }
+
+  // 取得期間: 直近 540 カレンダー日（≒ 1.5 年）→ 252 営業日確保
+  // J-Quants 無料プランは 12 週遅れなので、to は今日でも実際に返ってくるのは 84 日前まで
+  const today = new Date();
+  const fromDate = ymd(new Date(today.getTime() - HISTORY_DAYS * 24 * 60 * 60 * 1000));
+  const toDate = ymd(today);
+  console.log(`[refresh] history range: ${fromDate} → ${toDate} (~${HISTORY_DAYS} days; 12w delay applies on free plan)`);
+
   // ---------- データ取得 ----------
   let done = 0;
   let succeeded = 0;
   let lastLog = 0;
   const results = await poolRun(targetUniverse, CONCURRENCY, async (s) => {
-    const r = await computeOne(s);
+    const r = await computeOne(s, fromDate, toDate, listedInfoMap);
     done++;
     if (r) succeeded++;
     if (done - lastLog >= LOG_INTERVAL || done === targetUniverse.length) {
@@ -275,7 +362,7 @@ async function main() {
       universeSize: targetUniverse.length,
       durationMs: Date.now() - startedAt,
       finishedAt: new Date().toISOString(),
-      source: 'stooq',
+      source: 'jquants',
     },
     7 * 24 * 60 * 60,
   );
