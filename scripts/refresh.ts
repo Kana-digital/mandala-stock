@@ -347,6 +347,17 @@ async function main() {
     });
     const bulkElapsed = ((Date.now() - bulkStart) / 1000).toFixed(0);
     console.log(`[refresh] bulk done: ${prefetchedBars.size} codes in ${bulkElapsed}s`);
+
+    // Safeguard: if the bulk-by-date endpoint produced suspiciously little data
+    // (e.g. plan restriction, network issue), fall back to per-stock fetch so we
+    // don't end up with an empty ranking. Threshold = 100 codes.
+    if (prefetchedBars.size < 100) {
+      console.warn(
+        `[refresh] bulk produced only ${prefetchedBars.size} codes (< 100). ` +
+          `Falling back to per-stock fetchDailyQuotes to avoid empty ranking.`,
+      );
+      prefetchedBars = undefined;
+    }
   } else {
     console.log(`[refresh] BULK_PRICES=false → per-stock fetchDailyQuotes`);
   }

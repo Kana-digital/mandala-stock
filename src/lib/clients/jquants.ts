@@ -192,21 +192,62 @@ export async function fetchAllDailyQuotesInRange(
   }
 
   const byCode = new Map<string, JqDailyBar[]>();
+  let consecutiveEmpty = 0;
+  let consecutiveFailure = 0;
   for (let i = 0; i < dates.length; i++) {
     const d = dates[i];
+    let dayBars = 0;
+    let ok = false;
     try {
       const bars = await fetchDailyQuotesByDate(d);
+      dayBars = bars.length;
+      ok = true;
       for (const bar of bars) {
         const code4 = (bar.Code || '').slice(0, 4);
         const arr = byCode.get(code4) ?? [];
         arr.push(bar);
         byCode.set(code4, arr);
       }
+      // Diagnostics: print first day always, then every 10th day, plus any zero-bar day.
+      if (i < 3 || dayBars === 0 || (i + 1) % 10 === 0) {
+        const sample = bars[0]
+          ? `first.Code=${bars[0].Code} first.Date=${bars[0].Date} first.AdjC=${bars[0].AdjC}`
+          : '(empty data)';
+        // eslint-disable-next-line no-console
+        console.log(`[jquants] fetchByDate ${d}: bars=${dayBars} ${sample}`);
+      }
     } catch (e) {
       // 1 日失敗しても続行（祝日や非営業日と同様の扱い）
-      const msg = (e as Error).message.slice(0, 100);
+      const msg = (e as Error).message;
       // eslint-disable-next-line no-console
-      console.warn(`[jquants] fetchByDate ${d} failed: ${msg}`);
+      console.warn(`[jquants] fetchByDate ${d} FAILED: ${msg.slice(0, 300)}`);
+    }
+    if (ok && dayBars === 0) {
+      consecutiveEmpty++;
+      consecutiveFailure = 0;
+    } else if (!ok) {
+      consecutiveFailure++;
+      consecutiveEmpty = 0;
+    } else {
+      consecutiveEmpty = 0;
+      consecutiveFailure = 0;
+    }
+    // Early bail: if we hit 15 consecutive zero-data or 10 consecutive failures,
+    // the endpoint clearly isn't working — stop wasting time/req budget.
+    if (consecutiveEmpty >= 15) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[jquants] aborting bulk-by-date: ${consecutiveEmpty} consecutive days returned 0 bars. ` +
+          'Possible plan restriction on date-only query. Caller should fall back to per-code fetch.',
+      );
+      break;
+    }
+    if (consecutiveFailure >= 10) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[jquants] aborting bulk-by-date: ${consecutiveFailure} consecutive failures. Caller should fall back.`,
+      );
+      break;
     }
     if (onProgress) onProgress(i + 1, dates.length, d);
     if (sleepMs > 0 && i < dates.length - 1) await sleep(sleepMs);
