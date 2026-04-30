@@ -76,8 +76,11 @@ const LOG_INTERVAL = 100;
 const RANKING_CHUNK_SIZE = 1000;
 // rankingAll（レガシー）に保存する閾値: ユニバースが小さいときだけ
 const LEGACY_RANKING_ALL_THRESHOLD = 500;
-// 日足取得期間（営業日 252 ≒ 1.5 年）
-const HISTORY_DAYS = 540; // カレンダー日。土日祝込みでも 252 営業日は確保できる
+// 日足取得期間（営業日 ~210 ≒ 1 年）
+// BULK_PRICES=true の場合、HISTORY_DAYS が大きいほど bulk 取得時間が線形に伸びるため、
+// 1 年分（210 営業日）に短縮して 180 分タイムアウトに収まるようにする。
+// 移動平均・モメンタム計算には 1 年あれば十分。
+const HISTORY_DAYS = 365; // カレンダー日 → ~210 営業日
 // Free プラン: 12 週遅延 → to は今日より 84 日以上前を指定する必要あり
 // （余裕を見て 90 日前にする）
 const FREE_PLAN_DELAY_DAYS = 90;
