@@ -14,9 +14,11 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # J-Quants Free プランはレート制限が厳しく、3,589 銘柄を 1.5 秒間隔で
-    # シーケンシャルに取得すると約 90 分。安全マージンとして 180 分上限。
-    timeout-minutes: 180
+    # J-Quants Free プランは bulk 取得 (BULK_PRICES=true) でも
+    # 営業日ごとに 4 秒スリープ × ~250 営業日 + リトライで 130 分前後、
+    # スコアリング込みで 150-165 分かかる。実測で 3h を超えるケースもあるため、
+    # GitHub Actions Standard runner の上限 360 min の手前 350 min を設定。
+    timeout-minutes: 350
 
     steps:
       - name: Checkout
