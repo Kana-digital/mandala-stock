@@ -37,16 +37,20 @@ jobs:
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
           # J-Quants V2 API Key（ダッシュボードで発行したもの）。変数名は互換のため REFRESH_TOKEN 名残
           JQUANTS_REFRESH_TOKEN: ${{ secrets.JQUANTS_REFRESH_TOKEN }}
-          # Free プランは 1 リクエスト/秒未満のレート制限あり。安全側で
-          # シーケンシャル実行 + 1.5 秒間隔で 429 を回避。
+          # Free プランのレート制限は実測で「1.5秒/req では 429 を頻発」、
+          # 各 429 は 10/20/40/80/160 秒の指数バックオフを誘発するため、
+          # SLEEP_MS は 4000ms に引き上げて事実上 429 が出ない状態で回す。
           # jquants.ts 側で 429 を最大 5 回・指数バックオフ（最大 ~5 分待機）で
           # リトライするので、外側のタイムアウトはそれ以上に取る必要がある。
           REFRESH_CONCURRENCY: '1'
-          REFRESH_SLEEP_MS: '1500'
+          REFRESH_SLEEP_MS: '4000'
           REFRESH_TIMEOUT_MS: '420000'
-          # TOPIX 100 (Core30 + Large70) のみに絞る。
-          # 'topix500' = Core30+Large70+Mid400, 'all' = 全銘柄
-          SCALE_FILTER: 'topix100'
+          # TOPIX 500 (Core30 + Large70 + Mid400) ~489 銘柄。
+          # 'topix100' = Core30+Large70（軽量）, 'all' = 全銘柄
+          SCALE_FILTER: 'topix500'
+          # BULK_PRICES=true: /equities/bars/daily?date=... を営業日ごとに 1 回呼んで
+          # 全銘柄の bar を一括取得する。銘柄ごとの per-stock 取得より req 数が大幅減。
+          BULK_PRICES: 'true'
         run: npm run refresh
 
       - name: Summary

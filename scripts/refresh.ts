@@ -43,8 +43,10 @@ async function loadDotenv() {
 
 import {
   fetchDailyQuotes,
+  fetchAllDailyQuotesInRange,
   fetchStatements,
   fetchAllListedInfo,
+  type JqDailyBar,
   type JqListedInfo,
 } from '../src/lib/clients/jquants';
 import {
@@ -129,15 +131,21 @@ async function computeOne(
   fromDate: string,
   toDate: string,
   listedInfoMap: Map<string, JqListedInfo>,
+  prefetchedBars?: Map<string, JqDailyBar[]>,
 ): Promise<MandalaResult | null> {
   try {
     // J-Quants は 4 桁コードでも 5 桁コード（末尾 0 付与）でも受け付けるが、
     // /listed/info は 4 桁で返ってくるケースが多い。揃えるため 4→4 のまま渡す。
     const code = stock.code;
 
-    // 日足 + 決算を並行取得
+    // 日足: bulk 事前取得済みなら map から取り出し、そうでなければ個別取得
+    const quotesPromise: Promise<JqDailyBar[]> = prefetchedBars
+      ? Promise.resolve(prefetchedBars.get(code) ?? prefetchedBars.get(code + '0') ?? [])
+      : withTimeout(fetchDailyQuotes(code, fromDate, toDate), FETCH_TIMEOUT_MS, `quotes ${code}`);
+
+    // 決算は per-stock のみ
     const [quotes, statements] = await Promise.all([
-      withTimeout(fetchDailyQuotes(code, fromDate, toDate), FETCH_TIMEOUT_MS, `quotes ${code}`),
+      quotesPromise,
       withTimeout(fetchStatements(code), FETCH_TIMEOUT_MS, `statements ${code}`).catch(() => []),
     ]);
 
@@ -317,12 +325,38 @@ async function main() {
   const toDate = ymd(toDateObj);
   console.log(`[refresh] history range: ${fromDate} → ${toDate} (~${HISTORY_DAYS} days; to = today - ${FREE_PLAN_DELAY_DAYS}d for free plan delay)`);
 
+  // ---------- 日足を「日付 × 全銘柄」で bulk 事前取得（オプション） ----------
+  // BULK_PRICES=true（既定）: /equities/bars/daily?date=... を営業日ごとに 1 回呼び、
+  //   全銘柄の bar を Map<code, JqDailyBar[]> に集約する。
+  //   リクエスト数: ~営業日数 (~370 日 × 1 = 370 reqs) + 銘柄数（statements 用）
+  //   ↔ 旧来は 銘柄数 × 2 = 2N reqs だったので、N=489 なら 978 → ~860 と微減。
+  //   ただし日付単位のレスポンスは大きいので、Free プランの req カウンタ的に有利。
+  // BULK_PRICES=false: 旧来どおり銘柄ごとに /equities/bars/daily?code=... を呼ぶ。
+  const useBulkPrices = (process.env.BULK_PRICES ?? 'true').toLowerCase() !== 'false';
+  let prefetchedBars: Map<string, JqDailyBar[]> | undefined;
+  if (useBulkPrices) {
+    console.log(`[refresh] BULK_PRICES=true → prefetching daily bars by date (${fromDate} → ${toDate})...`);
+    const bulkStart = Date.now();
+    let lastDayLog = 0;
+    prefetchedBars = await fetchAllDailyQuotesInRange(fromDate, toDate, SLEEP_MS, (done, total, lastDate) => {
+      if (done - lastDayLog >= 20 || done === total) {
+        const elapsed = ((Date.now() - bulkStart) / 1000).toFixed(0);
+        console.log(`  [bulk ${done}/${total}] elapsed ${elapsed}s lastDate=${lastDate} codes=${prefetchedBars?.size ?? 0}`);
+        lastDayLog = done;
+      }
+    });
+    const bulkElapsed = ((Date.now() - bulkStart) / 1000).toFixed(0);
+    console.log(`[refresh] bulk done: ${prefetchedBars.size} codes in ${bulkElapsed}s`);
+  } else {
+    console.log(`[refresh] BULK_PRICES=false → per-stock fetchDailyQuotes`);
+  }
+
   // ---------- データ取得 ----------
   let done = 0;
   let succeeded = 0;
   let lastLog = 0;
   const results = await poolRun(targetUniverse, CONCURRENCY, async (s) => {
-    const r = await computeOne(s, fromDate, toDate, listedInfoMap);
+    const r = await computeOne(s, fromDate, toDate, listedInfoMap, prefetchedBars);
     done++;
     if (r) succeeded++;
     if (done - lastLog >= LOG_INTERVAL || done === targetUniverse.length) {

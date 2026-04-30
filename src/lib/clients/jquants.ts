@@ -147,6 +147,78 @@ export async function fetchDailyQuotes(
   return bars.sort((a, b) => (a.Date < b.Date ? -1 : 1));
 }
 
+/**
+ * 指定日の全銘柄の株価を取得。
+ * V2: /v2/equities/bars/daily?date=YYYYMMDD
+ * code を省略すると、その日の全上場銘柄のデータが返る（pagination_key で複数ページ）。
+ *
+ * 銘柄ごとに呼ぶより遥かに少ないリクエスト数で済むので、
+ * 期間取得を「銘柄 × 期間」ではなく「日 × 全銘柄」のループで実装するのに使う。
+ */
+export async function fetchDailyQuotesByDate(date: string): Promise<JqDailyBar[]> {
+  const query: Record<string, string | undefined> = { date: yyyymmdd(date) };
+  // 全上場銘柄 ~3,600 件 × 1 日。1 ページに収まるかは API 次第なので余裕を持たせる
+  return jqGetAll<JqDailyBar>('/equities/bars/daily', query, 30);
+}
+
+/**
+ * 指定期間（営業日のみ）について全銘柄の日足を取得し、
+ * 銘柄コードごとにグルーピングした Map<code, JqDailyBar[]> を返す。
+ *
+ * 各日付ループの間に sleepMs だけ待ち、レート制限を踏まないようにする。
+ * onProgress(doneDays, totalDays) で進捗を通知できる。
+ *
+ * @param fromDate YYYY-MM-DD（含む）
+ * @param toDate   YYYY-MM-DD（含む）
+ * @param sleepMs  各日付リクエスト間の待機ms（デフォルト 1500）
+ * @param onProgress 進捗コールバック
+ */
+export async function fetchAllDailyQuotesInRange(
+  fromDate: string,
+  toDate: string,
+  sleepMs = 1500,
+  onProgress?: (doneDays: number, totalDays: number, lastDate: string) => void,
+): Promise<Map<string, JqDailyBar[]>> {
+  // fromDate → toDate を日次でループ。土日と祝日は API が空 data を返すだけなのでスキップ判定不要。
+  // ただし土日は明らかに無駄なのでスキップ。
+  const start = new Date(fromDate + 'T00:00:00Z').getTime();
+  const end = new Date(toDate + 'T00:00:00Z').getTime();
+  const dates: string[] = [];
+  for (let t = start; t <= end; t += 24 * 60 * 60 * 1000) {
+    const d = new Date(t);
+    const dow = d.getUTCDay(); // 0=Sun, 6=Sat
+    if (dow === 0 || dow === 6) continue;
+    dates.push(d.toISOString().slice(0, 10));
+  }
+
+  const byCode = new Map<string, JqDailyBar[]>();
+  for (let i = 0; i < dates.length; i++) {
+    const d = dates[i];
+    try {
+      const bars = await fetchDailyQuotesByDate(d);
+      for (const bar of bars) {
+        const code4 = (bar.Code || '').slice(0, 4);
+        const arr = byCode.get(code4) ?? [];
+        arr.push(bar);
+        byCode.set(code4, arr);
+      }
+    } catch (e) {
+      // 1 日失敗しても続行（祝日や非営業日と同様の扱い）
+      const msg = (e as Error).message.slice(0, 100);
+      // eslint-disable-next-line no-console
+      console.warn(`[jquants] fetchByDate ${d} failed: ${msg}`);
+    }
+    if (onProgress) onProgress(i + 1, dates.length, d);
+    if (sleepMs > 0 && i < dates.length - 1) await sleep(sleepMs);
+  }
+
+  // code ごとに日付昇順
+  for (const arr of byCode.values()) {
+    arr.sort((a, b) => (a.Date < b.Date ? -1 : 1));
+  }
+  return byCode;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 財務情報サマリー
 // ─────────────────────────────────────────────────────────────
