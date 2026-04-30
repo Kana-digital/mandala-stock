@@ -47,9 +47,13 @@ jobs:
           REFRESH_CONCURRENCY: '1'
           REFRESH_SLEEP_MS: '4000'
           REFRESH_TIMEOUT_MS: '420000'
-          # TOPIX 500 (Core30 + Large70 + Mid400) ~489 銘柄。
+          # TOPIX 500 (Core30 + Large70 + Mid400) ~489 銘柄から先頭 300 を採用。
           # 'topix100' = Core30+Large70（軽量）, 'all' = 全銘柄
           SCALE_FILTER: 'topix500'
+          # scoring が ~30 sec/銘柄 と重く、489 銘柄では 350 min タイムアウト超過のため
+          # LIMIT=300 で Core30(30) + Large70(70) + Mid400 上位200 ≒ TOPIX300 相当に絞る。
+          # scoring 30s × 300 = 150 min + bulk ~120 min ≒ 270 min で完走見込み。
+          LIMIT: '300'
           # BULK_PRICES=true: /equities/bars/daily?date=... を営業日ごとに 1 回呼んで
           # 全銘柄の bar を一括取得する。銘柄ごとの per-stock 取得より req 数が大幅減。
           BULK_PRICES: 'true'
