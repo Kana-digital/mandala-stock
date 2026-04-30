@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { ChevronLeft, TrendingUp, RefreshCw, Sparkles } from 'lucide-react';
+import RegenerateButton from '@/components/RegenerateButton';
 
 interface RankingItem {
   ticker: string;
@@ -102,8 +103,11 @@ export default function RankingPage() {
         </div>
 
         {data && (
-          <div className="text-[10px] text-slate-500 mb-3 px-1">
-            {data.universeSize} 銘柄から計算 ・ {new Date(data.generatedAt).toLocaleString('ja-JP')}
+          <div className="flex items-center justify-between gap-2 mb-3 px-1">
+            <div className="text-[10px] text-slate-500">
+              {data.universeSize} 銘柄から計算 ・ {new Date(data.generatedAt).toLocaleString('ja-JP')}
+            </div>
+            <RegenerateButton />
           </div>
         )}
 
